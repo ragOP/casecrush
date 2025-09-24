@@ -254,7 +254,7 @@
         </div>
         <button type="submit" class="submit-btn">Post My Score</button>
         <p class="muted" style="font-size:11px;margin:8px 0 0">
-          No server storage here—this demo uses your browser only.
+          Your score will be saved to the global leaderboard.
         </p>
       </form>
 
@@ -305,7 +305,7 @@
     </div>
   </section>
 
-  <footer class="strip">© 2025 Case Crushers • This quiz page is an ad lander demo (no backend).</footer>
+  <footer class="strip">© 2025 Case Crushers • Detective Quiz with Live Leaderboard</footer>
 
   <script>
     // ---------- Config ----------
@@ -454,31 +454,76 @@
       return s.toFixed(2) + 's';
     }
 
-    function loadLeaderboard(){
-      const raw = localStorage.getItem('cc_leaderboard');
-      return raw ? JSON.parse(raw) : [...SAMPLE_LEADERBOARD];
+    // API Configuration
+    const API_BASE = 'https://skyscale-be.onrender.com/api/case';
+    
+    async function loadLeaderboard(){
+      try {
+        const response = await fetch(`${API_BASE}/get-leaderboard?page=1&limit=50`);
+        if (!response.ok) throw new Error('Failed to fetch leaderboard');
+        const data = await response.json();
+        return data.success ? data.data : [...SAMPLE_LEADERBOARD];
+      } catch (error) {
+        console.warn('Failed to load leaderboard from API, using fallback:', error);
+        const raw = localStorage.getItem('cc_leaderboard');
+        return raw ? JSON.parse(raw) : [...SAMPLE_LEADERBOARD];
+      }
     }
+    
     function saveLeaderboard(list){
+      // Keep localStorage as backup
       localStorage.setItem('cc_leaderboard', JSON.stringify(list));
     }
 
-    function postMyScore(name, phone){
+    async function postMyScore(name, phone){
       const took = Math.max(1, performance.now() - startedAt);
-      const entry = { name, phone, score, ms: Math.floor(took) };
-      const list = loadLeaderboard();
+      const entry = { name, phoneNumber: phone, score, ms: Math.floor(took) };
+      
+      try {
+        // Submit to API
+        const response = await fetch(`${API_BASE}/create-record`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify(entry)
+        });
+        
+        if (!response.ok) throw new Error('Failed to submit score');
+        const result = await response.json();
+        
+        if (!result.success) throw new Error(result.error || 'Failed to submit score');
+        
+        // Get updated leaderboard
+        const list = await loadLeaderboard();
+        const userEntry = { name, phone, score, ms: Math.floor(took)};
+        const index = list.findIndex(item => 
+          (item.name === name && item.phoneNumber === phone) || 
+          (item.name === name && item.phone === phone)
+        );
+        
+        return { entry: userEntry, index: Math.max(0, index), list };
+        
+      } catch (error) {
+        console.warn('Failed to submit to API, using local fallback:', error);
+        
+        // Fallback to local storage
+        const localEntry = { name, phone, score, ms: Math.floor(took) };
+        const list = await loadLeaderboard();
 
-      // Insert + sort: higher score first, then lower time wins
-      list.push(entry);
-      list.sort((a,b)=>{
-        if(b.score !== a.score) return b.score - a.score;
-        return a.ms - b.ms;
-      });
+        // Insert + sort: higher score first, then lower time wins
+        list.push(localEntry);
+        list.sort((a,b)=>{
+          if(b.score !== a.score) return b.score - a.score;
+          return a.ms - b.ms;
+        });
 
-      // keep only top 50 (demo)
-      const trimmed = list.slice(0,50);
-      saveLeaderboard(trimmed);
+        // keep only top 50 (demo)
+        const trimmed = list.slice(0,50);
+        saveLeaderboard(trimmed);
 
-      return { entry, index: trimmed.indexOf(entry), list: trimmed };
+        return { entry: localEntry, index: trimmed.indexOf(localEntry), list: trimmed };
+      }
     }
 
     function renderLeaderboard(myIndex, list){
@@ -489,11 +534,17 @@
         const medal = i===0 ? '🥇' : i===1 ? '🥈' : i===2 ? '🥉' : '—';
         const tr = document.createElement('tr');
         if(i===myIndex) tr.classList.add('me');
+        
+        
+        const displayTime = row.ms ? formatMs(row.ms) : 'N/A';
+        const displayName = row.name || 'Unknown';
+        const displayScore = row.score || 0;
+        
         tr.innerHTML = `
           <td class="medal">${medal}</td>
-          <td>${row.name}</td>
-          <td>${row.score}/${QUESTIONS.length}</td>
-          <td>${formatMs(row.ms)}</td>
+          <td>${displayName}</td>
+          <td>${displayScore}/${QUESTIONS.length}</td>
+          <td>${displayTime}</td>
         `;
         leadBody.appendChild(tr);
       });
@@ -504,7 +555,7 @@
     // Events
     startBtn.addEventListener('click', startQuiz);
 
-    infoForm.addEventListener('submit', (e)=>{
+    infoForm.addEventListener('submit', async (e)=>{
       e.preventDefault();
       const name = (document.getElementById('name').value || '').trim().slice(0, 40);
       const phone = sanitizePhone(document.getElementById('phone').value);
@@ -512,9 +563,24 @@
       if(!name){ alert('Please enter your detective name.'); return; }
       if(!phone || phone.length < 8){ alert('Please enter a valid phone number.'); return; }
 
-      const { index, list } = postMyScore(name, phone);
-      infoForm.style.display = 'none';
-      renderLeaderboard(index, list);
+      // Show loading state
+      const submitBtn = infoForm.querySelector('.submit-btn');
+      const originalText = submitBtn.textContent;
+      submitBtn.textContent = 'Posting Score...';
+      submitBtn.disabled = true;
+
+      try {
+        const { index, list } = await postMyScore(name, phone);
+        infoForm.style.display = 'none';
+        renderLeaderboard(index, list);
+      } catch (error) {
+        console.error('Error submitting score:', error);
+        alert('Failed to submit score. Please try again.');
+      } finally {
+        // Reset button state
+        submitBtn.textContent = originalText;
+        submitBtn.disabled = false;
+      }
     });
 
     againBtn.addEventListener('click', (e)=>{
